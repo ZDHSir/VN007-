@@ -15,7 +15,7 @@ Installed as /Users/zhang/Library/Android/sdk/platform-tools/adb
 接下来就是开始连接007/007+的网络了，用超级密码打开后台管理并且打开adb调试模式。然后打开终端进行以下操作：
 
 ```bash
-adb conect 192.168.0.1:5555
+adb connect 192.168.0.1:5555
 
 //等待出现conected出现。
 //接着输入

@@ -1,0 +1,1 @@
+adb push ddns /home

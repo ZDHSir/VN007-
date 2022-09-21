@@ -1,0 +1,1 @@
+./ddns-go -l 0.0.0.0:9876 -f 600 -c ./ddns-go.yaml

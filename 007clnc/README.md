@@ -57,6 +57,7 @@ sh /home/clnc/start.sh
 ```shell
 //进入adb shell 
 //如需登录，使用超级管理员账号密码登录，不用登陆直接往下走
+mount -o remount,rw /
 rm -rf /home/clnc
 vi /etc/init.d/adbd-init
 //进入编辑界面后，按下英文模式键i

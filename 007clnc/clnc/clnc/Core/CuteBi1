@@ -1,0 +1,211 @@
+### Author: CuteBi ###
+#### Version: 0.1 ####
+####  ipv4 share  ####
+
+#读取模式文件  得到所需内容
+readModeFile() {
+	[ ! -f "../$modeName" -a -f "../${modeName}.conf" ] && modeName="${modeName}.conf"
+	listen_port=`grep '^ *dns_listen' "../$modeName" | grep -o :[0-9][0-9]\*`
+	dns_listen=${listen_port#:}
+	listen_port=`grep '^ *tcp_listen' "../$modeName" | grep -o :[0-9][0-9]\*\;`
+	tcp_listen=`echo ${listen_port#:} | grep -o [0-9][0-9]*`
+	if grep -q 'TPROXY' /proc/net/ip_tables_targets; then
+		listen_port=`grep '^ *udp_tproxy_listen' "../$modeName" | grep -o :[0-9][0-9]\*`
+		udp_listen=${listen_port#:}
+	fi
+	grep -q '^ *tcp_option *= *TFO' "../$modeName" && echo '3' >/proc/sys/net/ipv4/tcp_fastopen
+}
+
+#通过包名得到uid
+getPackageUid() {
+	packageName=${1%%_*}  #过滤包名后面的端口
+	if echo $packageName | grep -q '[A-Za-z]'; then
+		packageInfo=`grep -oE "^$packageName ([0-9])+" /data/system/packages.list`
+		[ $? != 0 ] && return 1
+		echo "$1" | grep -qE '_([0-9])+' && \
+			echo "${packageInfo#* }_${1#*_}" || \
+			echo "${packageInfo#* }"
+	else
+		echo "$1"
+	fi
+}
+
+#放行
+allowService() {
+	#共享UDP放行
+	for p in $shareAllowUdpPorts; do
+		iptables -t mangle -I CLNC_FORWARD -p udp --dport $p -j ACCEPT
+	done
+}
+
+#配置iptables转发和ip路由
+iptablesAndIp() {
+	###nat表
+	iptables -t nat -N CLNC_PREROUTING 2>&-
+	iptables -t nat -I PREROUTING -s 192.168/16 ! -d 192.168/16 -g CLNC_PREROUTING
+	iptables -t nat -A CLNC_PREROUTING -s 192.168/16 -p udp --dport 53 -j REDIRECT --to $dns_listen #53
+	iptables -t nat -A CLNC_PREROUTING -s 192.168/16 ! -d 192.168/16 -p tcp -j REDIRECT --to $tcp_listen
+	###mangle表
+	iptables -t mangle -N CLNC_FORWARD 2>&-
+	iptables -t mangle -I FORWARD -g CLNC_FORWARD
+	if [ -z "$udp_listen" ]; then
+		iptables -t mangle -A CLNC_FORWARD -j DROP
+	else
+		iptables -t mangle -A CLNC_FORWARD ! -p udp -j DROP
+		iptables -t mangle -N CLNC_PREROUTING 2>&-
+		iptables -t mangle -I PREROUTING -g CLNC_PREROUTING
+		for allowIp in 127/8 10/8 192.168/16 172.16/12 255/8 224/4 240/4 169.254/16; do
+			iptables -t mangle -A CLNC_PREROUTING -d $allowIp -j ACCEPT
+		done
+		iptables -t mangle -A CLNC_PREROUTING ! -i tun+ -p udp -j TPROXY --on-port $udp_listen --tproxy-mark 999
+		##路由
+		ip rule add fwmark 999 table 100 pref 2>&-
+		ip route add local default dev lo table 100 2>&-
+	fi
+}
+
+#clnc运行状态检测
+clncRunStatus() {
+	[ -f "/proc/$(grep -o ^[0-9]* clnc.pid 2>/dev/null)/cwd/CuteBi" ] && \
+		echo '✔  clnc 正在运行' || \
+		echo '✘  clnc 没有运行'
+}
+
+#状态检查
+statusCheck() {
+	##网卡和IP检测
+	ip addr | grep -E "^[0-9]+:|inet" | while read line; do
+		if echo $line|grep -qE "^[0-9]+:"; then
+			devName=`echo $line|grep -iE "^[0-9]+: [^:]+:"`
+			devName=${devName#*: }
+			devName=${devName%%:*}
+			typeset -L17 devName=${devName%@*}
+		else
+			ipAddr=${line#* }
+			ipAddr=${ipAddr%% *}
+			echo "$devName$ipAddr"
+		fi
+	done
+	echo "✄┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄"
+	echo
+	clncRunStatus
+	{
+		iptables -t nat -N CLNC_PREROUTING
+		iptables -t mangle -N CLNC_OUTPUT
+		iptables -t mangle -N CLNC_PREROUTING
+	} 2>$-
+	echo
+	echo "✄┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄"
+	echo '❁ mangle表 PREROUTING链:'
+	iptables -t mangle -S PREROUTING
+	echo '✺ mangle表 CLNC_PREROUTING链:'
+	iptables -t mangle -S CLNC_PREROUTING
+	echo '❁ nat表 PREROUTING链:'
+	iptables -t nat -S PREROUTING
+	echo '✺ nat表 CLNC_PREROUTING链:'
+	iptables -t nat -S CLNC_PREROUTING
+	echo '❁ mangle表 FORWARD链:'
+	iptables -t mangle -S FORWARD
+	echo '✺ mangle表 CLNC_FORWARD链:'
+	iptables -t mangle -S CLNC_FORWARD
+}
+
+clearServer() {
+	#关闭程序
+	for core in arm64 arm mips64le mipsle x86_64 x86; do
+		./$core -k
+	done 2>/dev/null
+	{
+		#清理ip路由规则
+		ip rule delete fwmark 999 table 100
+		ip route delete local default dev lo table 100
+		#清理iptables规则
+		iptables -t nat -D PREROUTING -s 192.168/16 ! -d 192.168/16 -g CLNC_PREROUTING
+		iptables -t mangle -D PREROUTING -g CLNC_PREROUTING
+		iptables -t mangle -D FORWARD -g CLNC_FORWARD
+		iptables -t nat -F CLNC_PREROUTING
+		iptables -t mangle -F CLNC_PREROUTING
+		iptables -t mangle -F CLNC_FORWARD
+		iptables -t nat -Z CLNC_PREROUTING
+		iptables -t mangle -Z CLNC_PREROUTING
+		iptables -t mangle -Z CLNC_FORWARD
+		iptables -t nat -X CLNC_PREROUTING
+		iptables -t mangle -X CLNC_PREROUTING
+		iptables -t mangle -X CLNC_FORWARD
+	} 2>/dev/null
+}
+
+#设置clnc启动时查询域名的DNSIP
+setClncInitConfigDns() {
+	if [ -n "$clnc_dns" ]; then
+		export CLNC_INIT_CONFIG_DNS="$clnc_dns"
+	else
+		for i in 1 2 3 4; do
+			getprop net.dns${i}|grep -q '\.' &&  export CLNC_INIT_CONFIG_DNS=`getprop net.dns${i}` && break
+		done
+		[ -z "$CLNC_INIT_CONFIG_DNS" ] && export CLNC_INIT_CONFIG_DNS=119.29.29.29
+	fi
+}
+
+startServer() {
+	readModeFile #读取模式文件
+	clearServer #关闭脚本
+	iptablesAndIp #启动防跳
+	allowService #执行放行服务
+	setClncInitConfigDns  #设置clnc启动时查询域名的DNSIP
+	#启动程序
+	for core in arm64 arm mips64le mipsle x86_64 x86; do
+		./$core -p clnc.pid -g 3004 -c "../$modeName"
+	done 2>/dev/null
+}
+
+#ip[6]tables命令获取锁失败则重新执行
+aliasIptables() {
+	iptables_path=`which iptables`
+	ip6tables_path=`which ip6tables`
+	if iptables --help | grep -q "\-w"; then
+		iptables() { "${iptables_path:-/system/bin/iptables}" -w $@; }
+		ip6tables() { "${ip6tables_path:-/system/bin/ip6tables}" -w $@; }
+	else
+		iptables() {
+			result=`"${iptables_path:-/system/bin/iptables}" $@ 2>&1`
+			[ "$?" = '4' ] && iptables $@ || echo -E "$result"|grep -qE 'xtables block|xtables_lock wait = [1-9]'
+		}
+		ip6tables() {
+			result=`"${ip6tables_path:-/system/bin/ip6tables}" $@ 2>&1`
+			[ "$?" = '4' ] && ip6tables $@ || echo -E "$result"|grep -qE 'xtables block|xtables_lock wait = [1-9]'
+		}
+	fi
+}
+
+#读取脚本配置文件
+readConfigFile() {
+	eval "`grep -v '^\;' ../config.ini`"  #ini文件;开头是注释
+}
+
+#脚本入口
+main() {
+	cd "${1%/*}"
+	chmod 777 *
+	readConfigFile
+	aliasIptables
+	case "$2" in
+		'stop')
+			clearServer
+			echo "✄┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄"
+			clncRunStatus
+			echo "✄┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄"
+		;;
+		'start')
+			startServer
+			echo "✄┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄"
+			clncRunStatus
+			echo "✄┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄"
+		;;
+		'status')
+			statusCheck
+		;;
+	esac
+}
+
+main "$0" "$1" 2>&1

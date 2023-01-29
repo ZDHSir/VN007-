@@ -18,11 +18,7 @@
 > 重启，就可以改好串号了。
 > ```提示：计算超级密码网址:```
 >
-> ```http://x86.z410.icu,```
->
-> ```https://xj.z410.icu,```
->
-> ```http://vn007.zhome.icu:5007,```
+> ```http://home.z410.icu:5007,```
 >
 > ```https://tool.zootu.cn/tools/api/007imei/```
 >
